@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB 清单按评分全局排序
 // @namespace    https://github.com/
-// @version      2.0.0
+// @version      2.1.0
 // @description  在 JavDB 清单详情页（/users/list_detail?id=...）中，抓取清单全部分页并按评分对番号卡片全局排序。
 // @author       141jav
 // @match        https://javdb.com/users/list_detail*
@@ -12,6 +12,7 @@
   'use strict';
 
   const BUTTON_ID = 'javdb-sort-rating-button';
+  const MAX_SCAN_PAGES = 80;
 
   function getCards(root = document) {
     const candidates = Array.from(root.querySelectorAll('a[href^="/v/"]'));
@@ -73,26 +74,33 @@
     return u.toString();
   }
 
+  function buildListPageUrl(listId, page) {
+    const u = new URL('/users/list_detail', location.origin);
+    u.searchParams.set('id', listId);
+    if (page > 1) u.searchParams.set('page', String(page));
+    return normalizeUrl(u.toString());
+  }
+
   function getPageNumber(url) {
     const page = Number.parseInt(new URL(url, location.origin).searchParams.get('page') || '1', 10);
     return Number.isFinite(page) && page > 0 ? page : 1;
   }
 
-  function collectListPageUrls() {
-    const current = new URL(location.href);
-    const currentId = current.searchParams.get('id');
+  function hasNextPage(doc) {
+    const links = Array.from(doc.querySelectorAll('.pagination a[href]'));
 
-    const urls = new Set([normalizeUrl(location.href)]);
-    const links = document.querySelectorAll('.pagination a[href]');
-
-    links.forEach((link) => {
-      const url = new URL(link.getAttribute('href') || '', location.origin);
-      if (url.pathname !== '/users/list_detail') return;
-      if (url.searchParams.get('id') !== currentId) return;
-      urls.add(normalizeUrl(url.toString()));
+    return links.some((a) => {
+      const text = (a.textContent || '').trim();
+      return /下一页|下一頁|next/i.test(text);
     });
+  }
 
-    return Array.from(urls).sort((a, b) => getPageNumber(a) - getPageNumber(b));
+  function createDocSignature(doc) {
+    const hrefs = Array.from(doc.querySelectorAll('a[href^="/v/"]')).map((a) => a.getAttribute('href') || '');
+    if (!hrefs.length) return '';
+    const first = hrefs[0];
+    const last = hrefs[hrefs.length - 1];
+    return `${hrefs.length}:${first}:${last}`;
   }
 
   async function fetchPageDocument(url) {
@@ -111,9 +119,40 @@
     return new DOMParser().parseFromString(html, 'text/html');
   }
 
+  async function collectAllPageDocs(listId, onProgress) {
+    const docs = [];
+    let previousSignature = '';
+
+    for (let page = 1; page <= MAX_SCAN_PAGES; page += 1) {
+      const url = buildListPageUrl(listId, page);
+      // eslint-disable-next-line no-await-in-loop
+      const doc = await fetchPageDocument(url);
+      const cards = getCards(doc);
+      const signature = createDocSignature(doc);
+
+      if (!cards.length) break;
+      if (previousSignature && signature && signature === previousSignature) break;
+
+      docs.push({ url, doc });
+      previousSignature = signature;
+
+      if (onProgress) onProgress(page, MAX_SCAN_PAGES);
+      if (!hasNextPage(doc)) break;
+    }
+
+    return docs;
+  }
+
   async function sortAllPagesByRating() {
     const button = document.getElementById(BUTTON_ID);
     if (!button) return;
+
+    const currentUrl = new URL(location.href);
+    const listId = currentUrl.searchParams.get('id');
+    if (!listId) {
+      console.warn('[JavDB 排序] URL 中缺少清单 id 参数。');
+      return;
+    }
 
     const localCards = getCards(document);
     const localContainer = getCardContainer(localCards);
@@ -122,20 +161,14 @@
       return;
     }
 
-    const pageUrls = collectListPageUrls();
     const originalLabel = button.textContent;
     button.disabled = true;
-    button.textContent = `抓取中 0/${pageUrls.length}`;
+    button.textContent = '抓取中 0/?';
 
     try {
-      const pageDocs = [];
-      for (let i = 0; i < pageUrls.length; i += 1) {
-        const url = pageUrls[i];
-        // eslint-disable-next-line no-await-in-loop
-        const doc = await fetchPageDocument(url);
-        pageDocs.push({ url, doc });
-        button.textContent = `抓取中 ${i + 1}/${pageUrls.length}`;
-      }
+      const pageDocs = await collectAllPageDocs(listId, (page) => {
+        button.textContent = `抓取中 ${page}/?`;
+      });
 
       const allItems = [];
       pageDocs.forEach(({ url, doc }) => {
@@ -165,7 +198,7 @@
       localContainer.appendChild(fragment);
 
       button.textContent = `已排序 ${allItems.length} 部`;
-      console.info(`[JavDB 排序] 已完成：${pageUrls.length} 页、${allItems.length} 部影片，按评分从高到低排序。`);
+      console.info(`[JavDB 排序] 已完成：${pageDocs.length} 页、${allItems.length} 部影片，按评分从高到低排序。`);
     } catch (error) {
       console.error('[JavDB 排序] 失败：', error);
       button.textContent = '排序失败，请重试';
@@ -173,7 +206,7 @@
       setTimeout(() => {
         button.disabled = false;
         button.textContent = originalLabel;
-      }, 1200);
+      }, 1400);
     }
   }
 
