@@ -1,11 +1,15 @@
 // ==UserScript==
-// @name         JavDB 清单按评分全局排序
+// @name         JavDB 页面按评分全局排序
 // @namespace    https://github.com/
-// @version      2.2.0
-// @description  在 JavDB 清单详情页（/users/list_detail?id=...）中，抓取清单全部分页并按评分对番号卡片全局排序。
+// @version      3.0.0
+// @description  在 JavDB 各类影片列表页中，抓取全部分页并按评分对番号卡片全局排序。
 // @author       141jav
 // @match        https://javdb.com/users/list_detail*
 // @match        https://javdb.com/lists/*
+// @match        https://javdb.com/search*
+// @match        https://javdb.com/directors/*
+// @match        https://javdb.com/makers/*
+// @match        https://javdb.com/series/*
 // @grant        none
 // ==/UserScript==
 
@@ -13,7 +17,7 @@
   'use strict';
 
   const BUTTON_ID = 'javdb-sort-rating-button';
-  const MAX_SCAN_PAGES = 80;
+  const MAX_SCAN_PAGES = 120;
 
   function getCards(root = document) {
     const candidates = Array.from(root.querySelectorAll('a[href^="/v/"]'));
@@ -42,6 +46,7 @@
         max = count;
       }
     }
+
     return best;
   }
 
@@ -75,39 +80,29 @@
     return u.toString();
   }
 
-  function getListContext() {
-    const url = new URL(location.href);
+  function isSupportedPage(url) {
+    const path = url.pathname;
 
-    if (url.pathname === '/users/list_detail') {
-      const id = url.searchParams.get('id');
-      if (!id) return null;
-      return { type: 'user', id };
-    }
+    if (path === '/users/list_detail') return Boolean(url.searchParams.get('id'));
+    if (/^\/lists\/[^/]+/.test(path)) return true;
+    if (path === '/search') return true;
+    if (/^\/directors\/[^/]+/.test(path)) return true;
+    if (/^\/makers\/[^/]+/.test(path)) return true;
+    if (/^\/series\/[^/]+/.test(path)) return true;
 
-    const listMatch = url.pathname.match(/^\/lists\/([^/]+)/);
-    if (listMatch) {
-      return { type: 'public', id: listMatch[1] };
-    }
-
-    return null;
+    return false;
   }
 
-  function buildListPageUrl(context, page) {
+  function buildPageUrl(page) {
     const u = new URL(location.href);
     u.hash = '';
 
-    if (context.type === 'user') {
-      u.pathname = '/users/list_detail';
-      u.search = '';
-      u.searchParams.set('id', context.id);
-      if (page > 1) u.searchParams.set('page', String(page));
-      return normalizeUrl(u.toString());
+    if (page <= 1) {
+      u.searchParams.delete('page');
+    } else {
+      u.searchParams.set('page', String(page));
     }
 
-    // public list: /lists/<id>?page=N
-    u.pathname = `/lists/${context.id}`;
-    u.search = '';
-    if (page > 1) u.searchParams.set('page', String(page));
     return normalizeUrl(u.toString());
   }
 
@@ -117,11 +112,11 @@
   }
 
   function hasNextPage(doc) {
-    const links = Array.from(doc.querySelectorAll('.pagination a[href]'));
-
+    const links = Array.from(doc.querySelectorAll('.pagination a[href], nav.pagination a[href]'));
     return links.some((a) => {
+      const rel = (a.getAttribute('rel') || '').toLowerCase();
       const text = (a.textContent || '').trim();
-      return /下一页|下一頁|next/i.test(text);
+      return rel === 'next' || /下一页|下一頁|next|›|»/.test(text);
     });
   }
 
@@ -149,12 +144,12 @@
     return new DOMParser().parseFromString(html, 'text/html');
   }
 
-  async function collectAllPageDocs(context, onProgress) {
+  async function collectAllPageDocs(onProgress) {
     const docs = [];
     let previousSignature = '';
 
     for (let page = 1; page <= MAX_SCAN_PAGES; page += 1) {
-      const url = buildListPageUrl(context, page);
+      const url = buildPageUrl(page);
       // eslint-disable-next-line no-await-in-loop
       const doc = await fetchPageDocument(url);
       const cards = getCards(doc);
@@ -166,7 +161,7 @@
       docs.push({ url, doc });
       previousSignature = signature;
 
-      if (onProgress) onProgress(page, MAX_SCAN_PAGES);
+      if (onProgress) onProgress(page);
       if (!hasNextPage(doc)) break;
     }
 
@@ -177,9 +172,9 @@
     const button = document.getElementById(BUTTON_ID);
     if (!button) return;
 
-    const context = getListContext();
-    if (!context) {
-      console.warn('[JavDB 排序] 当前页面不是支持的清单地址。');
+    const current = new URL(location.href);
+    if (!isSupportedPage(current)) {
+      console.warn('[JavDB 排序] 当前页面不是支持的目标页面。');
       return;
     }
 
@@ -195,7 +190,7 @@
     button.textContent = '抓取中 0/?';
 
     try {
-      const pageDocs = await collectAllPageDocs(context, (page) => {
+      const pageDocs = await collectAllPageDocs((page) => {
         button.textContent = `抓取中 ${page}/?`;
       });
 
@@ -245,7 +240,7 @@
     const button = document.createElement('button');
     button.id = BUTTON_ID;
     button.type = 'button';
-    button.textContent = '全清单按评分排序';
+    button.textContent = '全页按评分排序';
     Object.assign(button.style, {
       position: 'fixed',
       right: '20px',
