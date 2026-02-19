@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         JavDB 清单按评分全局排序
 // @namespace    https://github.com/
-// @version      2.1.0
+// @version      2.2.0
 // @description  在 JavDB 清单详情页（/users/list_detail?id=...）中，抓取清单全部分页并按评分对番号卡片全局排序。
 // @author       141jav
 // @match        https://javdb.com/users/list_detail*
+// @match        https://javdb.com/lists/*
 // @grant        none
 // ==/UserScript==
 
@@ -74,9 +75,38 @@
     return u.toString();
   }
 
-  function buildListPageUrl(listId, page) {
-    const u = new URL('/users/list_detail', location.origin);
-    u.searchParams.set('id', listId);
+  function getListContext() {
+    const url = new URL(location.href);
+
+    if (url.pathname === '/users/list_detail') {
+      const id = url.searchParams.get('id');
+      if (!id) return null;
+      return { type: 'user', id };
+    }
+
+    const listMatch = url.pathname.match(/^\/lists\/([^/]+)/);
+    if (listMatch) {
+      return { type: 'public', id: listMatch[1] };
+    }
+
+    return null;
+  }
+
+  function buildListPageUrl(context, page) {
+    const u = new URL(location.href);
+    u.hash = '';
+
+    if (context.type === 'user') {
+      u.pathname = '/users/list_detail';
+      u.search = '';
+      u.searchParams.set('id', context.id);
+      if (page > 1) u.searchParams.set('page', String(page));
+      return normalizeUrl(u.toString());
+    }
+
+    // public list: /lists/<id>?page=N
+    u.pathname = `/lists/${context.id}`;
+    u.search = '';
     if (page > 1) u.searchParams.set('page', String(page));
     return normalizeUrl(u.toString());
   }
@@ -119,12 +149,12 @@
     return new DOMParser().parseFromString(html, 'text/html');
   }
 
-  async function collectAllPageDocs(listId, onProgress) {
+  async function collectAllPageDocs(context, onProgress) {
     const docs = [];
     let previousSignature = '';
 
     for (let page = 1; page <= MAX_SCAN_PAGES; page += 1) {
-      const url = buildListPageUrl(listId, page);
+      const url = buildListPageUrl(context, page);
       // eslint-disable-next-line no-await-in-loop
       const doc = await fetchPageDocument(url);
       const cards = getCards(doc);
@@ -147,10 +177,9 @@
     const button = document.getElementById(BUTTON_ID);
     if (!button) return;
 
-    const currentUrl = new URL(location.href);
-    const listId = currentUrl.searchParams.get('id');
-    if (!listId) {
-      console.warn('[JavDB 排序] URL 中缺少清单 id 参数。');
+    const context = getListContext();
+    if (!context) {
+      console.warn('[JavDB 排序] 当前页面不是支持的清单地址。');
       return;
     }
 
@@ -166,7 +195,7 @@
     button.textContent = '抓取中 0/?';
 
     try {
-      const pageDocs = await collectAllPageDocs(listId, (page) => {
+      const pageDocs = await collectAllPageDocs(context, (page) => {
         button.textContent = `抓取中 ${page}/?`;
       });
 
